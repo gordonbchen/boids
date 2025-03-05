@@ -3,92 +3,151 @@
 #include <math.h>
 #include <raylib.h>
 
+static const int N_BIRDS = 250;
+static const double BIRD_SIZE = 25.0;
+static const double INIT_VELOCITY_BIAS = 110.0;
+static const double INIT_VELOCITY_SCALE = 20.0;
 
-static const double M_PI = 3.14159265359;
+static const double BLIND_DIST = 200.0;
+static const double SEPARATION_DIST = 50.0;
+static const double COHESION_LERP = 0.015;
+static const double SEPARATION_LERP = 0.05;
+static const double ALIGNMENT_LERP = 0.01;
+static const double MIN_VELOCITY = 90.0;
+static const double MAX_VELOCITY = 300.0;
+static const double BOUNDARY = 20.0;
+static const double IN_BOUNDS_FACTOR = 0.6;
 
-static const int N_BIRDS = 20;
-static const double BLIND_DIST = 50.0;
-static const double BLIND_DIST2 = BLIND_DIST * BLIND_DIST;
-static const double BLIND_ANGLE = (3.0 * M_PI) / 4.0;
-static const double MAX_SPEED = 2.0;
-static const int BIRD_RADIUS = 10;
-
-static const int SCREEN_WIDTH = 1200;
-static const int SCREEN_HEIGHT = 800;
+static const int SCREEN_WIDTH = 1600;
+static const int SCREEN_HEIGHT = 1200;
 static const int FPS = 30;
 
+typedef struct Vector2d {
+	double x;
+	double y;
+} Vector2d;
 
 double rand1() {
 	return ((double) rand()) / RAND_MAX;
 }
 
-void update_bird(const int i, double* xs, double* ys, double* headings) {
-	int n_neighbors = 0;
-	double avg_x = 0.0;
-	double avg_y = 0.0;
-	double avg_heading = 0.0;
-
-	for (int j = 0; j < N_BIRDS; ++j) {
-		if (i == j) {continue;}
-
-		double dx = xs[j] - xs[i];
-		double dy = ys[j] - ys[i];
-		double dist2 = (dx*dx) + (dy*dy);
-		if (dist2 > BLIND_DIST2) {continue;}
-
-		double angle = atan2(dy, dx);
-		if (fabs(angle) > BLIND_ANGLE) {continue;}
-
-		++n_neighbors;
-		avg_x += xs[j];
-		avg_y += ys[j];
-		avg_heading += headings[j];
+double abs_clip(double x, double abs_max) {
+	if (x > abs_max) {
+		return abs_max;
 	}
-
-	if (n_neighbors > 0) {
-		avg_x /= n_neighbors;
-		avg_y /= n_neighbors;
-		avg_heading /= n_neighbors;
-
-		double dy = avg_y - ys[i];
-		double dx = avg_x - xs[i];
-		
-		double cohesion_heading = atan2(dy, dx);
-		double separation_heading = -cohesion_heading;
-		
-		double dist2 = (dx*dx) + (dy*dy);
-		double cohesion_weight = dist2 / BLIND_DIST2;
-
-		cohesion_heading *= cohesion_weight;
-		separation_heading *= (1.0 - cohesion_weight);
-		
-		// TODO: steer away from walls.
-		double new_heading = (avg_heading + cohesion_heading + separation_heading) / 3.0;
-		
-		// TODO: lerp with delta time.
-		headings[i] = (0.9 * headings[i]) + (0.1 * new_heading);
+	if (x < -abs_max) {
+		return -abs_max;
 	}
-
-	xs[i] += MAX_SPEED * cos(headings[i]);
-	ys[i] += MAX_SPEED * sin(headings[i]);
+	return x;
 }
 
-void draw_bird(double x, double y, double heading) {
-	DrawCircle(x, y, BIRD_RADIUS, BLUE);
-	DrawCircleLines(x, y, BLIND_DIST, RED);
-	DrawLine(x, y, x+(BIRD_RADIUS*cos(heading)), y+(BIRD_RADIUS*sin(heading)), BLACK);
+void update_velocity(const int i, Vector2d* positions, Vector2d* velocities) {
+	double avg_x = 0.0;
+	double avg_y = 0.0;
+	double avg_vx = 0.0;
+	double avg_vy = 0.0;
+	int neighbors = 0;
+
+	double delta_x = 0.0;
+	double delta_y = 0.0;
+	
+	for (int j = 0; j < N_BIRDS; ++j) {
+		if (j == i) {continue;}
+		double dx = positions[j].x - positions[i].x;
+		double dy = positions[j].y - positions[i].y;
+		double dist = sqrt((dx*dx) + (dy*dy));
+		if (dist > BLIND_DIST) {continue;}
+
+		avg_x += positions[j].x;
+		avg_y += positions[j].y;
+		avg_vx += velocities[j].x;
+		avg_vy += velocities[j].y;
+		++neighbors;
+		
+		if (dist > SEPARATION_DIST) {continue;}
+		delta_x -= dx;
+		delta_y -= dy;
+	}
+
+	if (neighbors > 0) {
+		avg_x /= neighbors;
+		avg_y /= neighbors;
+		avg_vx /= neighbors;
+		avg_vy /= neighbors;
+
+		velocities[i].x += COHESION_LERP * (avg_x - positions[i].x);
+		velocities[i].y += COHESION_LERP * (avg_y - positions[i].y);
+		velocities[i].x += ALIGNMENT_LERP * (avg_vx - velocities[i].x);
+		velocities[i].y += ALIGNMENT_LERP * (avg_vy - velocities[i].y);
+		velocities[i].x += SEPARATION_LERP * delta_x;
+		velocities[i].y += SEPARATION_LERP * delta_y;
+	}
+
+	if (positions[i].x < BOUNDARY) {
+		velocities[i].x += fabs(velocities[i].x) * IN_BOUNDS_FACTOR;
+	}
+	else if (positions[i].x > SCREEN_WIDTH-BOUNDARY) {
+		velocities[i].x -= fabs(velocities[i].x) * IN_BOUNDS_FACTOR;
+	}
+	if (positions[i].y < BOUNDARY) {
+		velocities[i].y += fabs(velocities[i].y) * IN_BOUNDS_FACTOR;
+	}
+	else if (positions[i].y > SCREEN_HEIGHT-BOUNDARY) {
+		velocities[i].y -= fabs(velocities[i].y) * IN_BOUNDS_FACTOR;
+	}
+	
+	double speed = sqrt((velocities[i].x)*(velocities[i].x)+(velocities[i].y)*(velocities[i].y));
+	double unit_vx = velocities[i].x / speed;
+	double unit_vy = velocities[i].y / speed;
+
+	if (speed > MAX_VELOCITY) {
+		velocities[i].x = unit_vx * MAX_VELOCITY;
+		velocities[i].y = unit_vy * MAX_VELOCITY;
+	}
+	else if (speed < MIN_VELOCITY) {
+		velocities[i].x = unit_vx * MIN_VELOCITY;
+		velocities[i].y = unit_vy * MIN_VELOCITY;
+	}
+}
+
+void update_bird(const int i, Vector2d* positions, Vector2d* velocities) {
+	update_velocity(i, positions, velocities);
+	positions[i].x += velocities[i].x / FPS;
+	positions[i].y += velocities[i].y / FPS;
+}
+
+void draw_bird(Vector2d* position, Vector2d* velocity) {
+	double speed = sqrt((velocity->x)*(velocity->x)+(velocity->y)*(velocity->y));
+	double unit_x = velocity->x / speed;
+	double unit_y = velocity->y / speed;
+	
+	double tip_dx = unit_x * BIRD_SIZE;
+	double tip_dy = unit_y * BIRD_SIZE;
+
+	double angle = atan2(unit_y, unit_x) + (PI / 4.0);
+	double base_dx = cos(angle) * BIRD_SIZE / 4.0;
+	double base_dy = sin(angle) * BIRD_SIZE / 4.0;
+
+	DrawTriangle(
+		(Vector2){position->x+tip_dx, position->y+tip_dy},
+		(Vector2){position->x-base_dx, position->y-base_dy},
+		(Vector2){position->x+base_dx, position->y+base_dy},
+		BLUE
+	);
 }
 
 int main() {
-	double* xs = malloc(sizeof(double) * N_BIRDS);
-	double* ys = malloc(sizeof(double) * N_BIRDS);
-	double* headings = malloc(sizeof(double) * N_BIRDS);  // right is 0, CCW +.
-	// TODO: variable speed;
+	Vector2d* positions = malloc(sizeof(Vector2d) * N_BIRDS);
+	Vector2d* velocities = malloc(sizeof(Vector2d) * N_BIRDS);
 
 	for (int i = 0; i < N_BIRDS; ++i) {
-		xs[i] = SCREEN_WIDTH * rand1();
-		ys[i] = SCREEN_HEIGHT * rand1();
-		headings[i] = M_PI * (2.0*(rand1()-0.5));
+		positions[i].x = SCREEN_WIDTH * rand1();
+		positions[i].y = SCREEN_HEIGHT * rand1();
+		velocities[i].x = INIT_VELOCITY_BIAS + (INIT_VELOCITY_SCALE*rand1());
+		velocities[i].y = INIT_VELOCITY_BIAS + (INIT_VELOCITY_SCALE*rand1());
+
+		if (rand1() > 0.5) {velocities[i].x = -velocities[i].x;}
+		if (rand1() > 0.5) {velocities[i].y = -velocities[i].y;}
 	}
 
 	InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "boids");
@@ -97,15 +156,14 @@ int main() {
 		BeginDrawing();
 		ClearBackground(RAYWHITE);
 		for (int i = 0; i < N_BIRDS; ++i) {
-			update_bird(i, xs, ys, headings);
-			draw_bird(xs[i], ys[i], headings[i]);
+			update_bird(i, positions, velocities);
+			draw_bird(&positions[i], &velocities[i]);
 		}
 		EndDrawing();
 	}
 	CloseWindow();
-
-	free(xs);
-	free(ys);
-	free(headings);
+	
+	free(positions);
+	free(velocities);
 }
 
